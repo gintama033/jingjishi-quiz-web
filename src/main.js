@@ -17,6 +17,7 @@ let sessionState = null
 let currentIndex = 0
 let multiDraft = new Set()
 let busy = false
+let view = 'practice'
 
 function escapeHtml(value = '') {
   return String(value).replace(/[&<>"']/g, (char) => ({
@@ -44,6 +45,11 @@ function renderAuth(message = '', email = '') {
     </main>`
 }
 
+function renderTabs() {
+  const tabs = [['practice', '练习'], ['wrong', '错题'], ['stats', '学习记录']]
+  return `<nav class="tabbar" aria-label="主导航">${tabs.map(([id, label]) => `<button class="tab${id === view ? ' active' : ''}" type="button" data-action="tab" data-tab="${id}"${id === view ? ' aria-current="page"' : ''}>${label}</button>`).join('')}</nav>`
+}
+
 function renderTopbar(backAction = '', backLabel = '') {
   return `<header class="topbar">
     <a class="brand" href="#" data-action="subjects" aria-label="经师首页"><span class="brand-mark">经</span>经师</a>
@@ -52,7 +58,8 @@ function renderTopbar(backAction = '', backLabel = '') {
       <span class="user-email">${escapeHtml(user?.email || '')}</span>
       <button class="text-button" type="button" data-action="signout">退出</button>
     </div>
-  </header>`
+  </header>
+  ${renderTabs()}`
 }
 
 function renderProblem(title, detail) {
@@ -83,6 +90,7 @@ async function saveSession() {
 }
 
 async function loadHome() {
+  view = 'practice'
   subject = ''
   mode = ''
   selectedChapter = ''
@@ -197,6 +205,7 @@ function renderChapters() {
 }
 
 async function loadPractice() {
+  view = 'practice'
   app.innerHTML = '<main class="page-shell"><div class="loading-card" role="status">正在连接题库…</div></main>'
   let query = supabase
     .from('questions')
@@ -364,6 +373,137 @@ async function goNext() {
   }
 }
 
+async function loadWrong() {
+  view = 'wrong'
+  app.innerHTML = `<div class="app-shell">${renderTopbar()}<main class="selection-shell"><div class="loading-card" role="status">正在读取错题…</div></main></div>`
+  const { data: attempts, error } = await supabase
+    .from('practice_attempts')
+    .select('question_id, selected_answer, answered_at')
+    .eq('is_correct', false)
+    .order('answered_at', { ascending: false })
+
+  if (error) {
+    renderProblem('无法读取错题', '请确认已运行 supabase/setup.sql，并使用自己的邮箱账号登录。')
+    return
+  }
+
+  const { data: dismissed, error: dismissError } = await supabase.from('wrong_dismissed').select('question_id, dismissed_at')
+  if (dismissError) {
+    renderProblem('错题清单尚未初始化', '请在 Supabase 重新运行 supabase/setup.sql，创建 wrong_dismissed 表。')
+    return
+  }
+
+  const dismissedAt = new Map((dismissed || []).map((row) => [row.question_id, row.dismissed_at]))
+  const latest = new Map()
+  for (const attempt of attempts || []) {
+    if (!latest.has(attempt.question_id)) latest.set(attempt.question_id, attempt)
+  }
+  const ids = [...latest.keys()].filter((id) => {
+    const dismissedTime = dismissedAt.get(id)
+    return !dismissedTime || new Date(dismissedTime) < new Date(latest.get(id).answered_at)
+  })
+
+  if (!ids.length) {
+    app.innerHTML = `<div class="app-shell">${renderTopbar()}<main class="selection-shell">
+      <p class="eyebrow">${escapeHtml(subjectName)}</p><h1 tabindex="-1">错题</h1>
+      <p class="selection-copy">当有题目答错时，会出现在这里是错题集里。答对后仍会保留，方便回头再看。</p>
+    </main></div>`
+    app.querySelector('h1')?.focus()
+    return
+  }
+
+  const { data: bankQuestions, error: questionError } = await supabase
+    .from('questions')
+    .select('id, stem, options, answer, analysis, chapter')
+    .eq('bank_id', bankId)
+    .in('id', ids)
+
+  if (questionError) {
+    renderProblem('无法读取错题内容', '请检查题目读取策略后重试。')
+    return
+  }
+
+  const byId = new Map((bankQuestions || []).map((question) => [question.id, question]))
+  const items = ids.map((id) => byId.get(id)).filter(Boolean)
+  app.innerHTML = `<div class="app-shell">${renderTopbar()}<main class="selection-shell">
+    <p class="eyebrow">${escapeHtml(subjectName)}</p>
+    <h1 tabindex="-1">错题 ${items.length} 道</h1>
+    <p class="selection-copy">答对后仍会保留，方便你回头再看；确认掌握后可手动移出。</p>
+    <div class="wrong-list">${items.map((question) => {
+      const picked = latest.get(question.id).selected_answer
+      return `<article class="wrong-item">
+        <p class="question-meta"><span>${escapeHtml(question.chapter || '章节待标注')}</span><span>${new Date(latest.get(question.id).answered_at).toLocaleDateString('zh-CN')}</span></p>
+        <h2>${escapeHtml(question.stem)}</h2>
+        <p class="wrongtxt">你的答案：${escapeHtml(Array.isArray(picked) ? picked.join('、') : picked)}</p>
+        <p class="righttxt">参考答案：${escapeHtml(Array.isArray(question.answer) ? question.answer.join('、') : question.answer)}</p>
+        <p class="analysis">${escapeHtml(question.analysis)}</p>
+        <button class="text-button" type="button" data-action="dismiss" data-id="${escapeHtml(question.id)}">移出错题</button>
+      </article>`
+    }).join('')}</div>
+  </main></div>`
+  app.querySelector('h1')?.focus()
+}
+
+async function loadStats() {
+  view = 'stats'
+  app.innerHTML = `<div class="app-shell">${renderTopbar()}<main class="selection-shell"><div class="loading-card" role="status">正在读取学习记录…</div></main></div>`
+  const start = new Date()
+  start.setHours(0, 0, 0, 0)
+  start.setDate(start.getDate() - 13)
+  const { data, error } = await supabase
+    .from('practice_attempts')
+    .select('is_correct, answered_at')
+    .gte('answered_at', start.toISOString())
+
+  if (error) {
+    renderProblem('无法读取学习记录', '请确认已运行 supabase/setup.sql，并使用自己的邮箱账号登录。')
+    return
+  }
+
+  const dayKey = (date) => {
+    const local = new Date(date)
+    return `${local.getFullYear()}-${String(local.getMonth() + 1).padStart(2, '0')}-${String(local.getDate()).padStart(2, '0')}`
+  }
+  const days = []
+  for (let offset = 13; offset >= 0; offset -= 1) {
+    const date = new Date()
+    date.setHours(0, 0, 0, 0)
+    date.setDate(date.getDate() - offset)
+    days.push({ key: dayKey(date), label: `${date.getMonth() + 1}/${date.getDate()}`, count: 0, correct: 0 })
+  }
+  const byKey = new Map(days.map((day) => [day.key, day]))
+  for (const attempt of data || []) {
+    const day = byKey.get(dayKey(attempt.answered_at))
+    if (!day) continue
+    day.count += 1
+    if (attempt.is_correct) day.correct += 1
+  }
+
+  const total = days.reduce((sum, day) => sum + day.count, 0)
+  const totalCorrect = days.reduce((sum, day) => sum + day.correct, 0)
+  const today = days[days.length - 1]
+  const peak = Math.max(1, ...days.map((day) => day.count))
+
+  app.innerHTML = `<div class="app-shell">${renderTopbar()}<main class="selection-shell">
+    <p class="eyebrow">${escapeHtml(subjectName)}</p>
+    <h1 tabindex="-1">学习记录</h1>
+    <div class="stat-summary">
+      <div><strong>${today.count}</strong><span>今天作答</span></div>
+      <div><strong>${today.count ? Math.round(today.correct / today.count * 100) : 0}%</strong><span>今天正确率</span></div>
+      <div><strong>${total}</strong><span>近 14 天作答</span></div>
+      <div><strong>${total ? Math.round(totalCorrect / total * 100) : 0}%</strong><span>近 14 天正确率</span></div>
+    </div>
+    ${total ? '' : '<p class="selection-copy">最近 14 天还没有作答记录。去练习几道题后，这里会显示每天的题量和正确率。</p>'}
+    <div class="day-list">${days.map((day) => `<div class="day-row">
+      <span class="day-label">${day.label}</span>
+      <span class="day-bar"><i style="width:${Math.round(day.count / peak * 100)}%"></i></span>
+      <span class="day-count">${day.count} 题</span>
+      <span class="day-rate">${day.count ? `${Math.round(day.correct / day.count * 100)}%` : '—'}</span>
+    </div>`).join('')}</div>
+  </main></div>`
+  app.querySelector('h1')?.focus()
+}
+
 app.addEventListener('submit', async (event) => {
   if (event.target.id !== 'auth-form') return
   event.preventDefault()
@@ -404,6 +544,17 @@ app.addEventListener('click', async (event) => {
   } else if (action === 'chapter') {
     selectedChapter = button.dataset.chapter
     await loadPractice()
+  } else if (action === 'tab') {
+    const tab = button.dataset.tab
+    if (tab === 'practice') await loadHome()
+    else if (tab === 'wrong') await loadWrong()
+    else await loadStats()
+  } else if (action === 'dismiss') {
+    const { error } = await supabase
+      .from('wrong_dismissed')
+      .upsert({ user_id: user.id, question_id: button.dataset.id, dismissed_at: new Date().toISOString() }, { onConflict: 'user_id,question_id' })
+    if (error) renderProblem('移出失败', '请检查网络后重试。')
+    else await loadWrong()
   } else if (action === 'reload') {
     if (mode) await loadPractice()
     else if (subject) renderModes()

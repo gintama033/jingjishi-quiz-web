@@ -41,13 +41,22 @@ create table if not exists public.practice_attempts (
 create index if not exists questions_bank_id_idx on public.questions (bank_id, id);
 create index if not exists practice_attempts_user_date_idx on public.practice_attempts (user_id, answered_at desc);
 
+create table if not exists public.wrong_dismissed (
+  user_id uuid not null references auth.users(id) on delete cascade default auth.uid(),
+  question_id text not null references public.questions(id) on delete restrict,
+  dismissed_at timestamptz not null default now(),
+  primary key (user_id, question_id)
+);
+
 alter table public.questions enable row level security;
 alter table public.practice_sessions enable row level security;
 alter table public.practice_attempts enable row level security;
+alter table public.wrong_dismissed enable row level security;
 
 grant select on public.questions to authenticated;
 grant select, insert, update, delete on public.practice_sessions to authenticated;
 grant select, insert on public.practice_attempts to authenticated;
+grant select, insert, update, delete on public.wrong_dismissed to authenticated;
 
 drop policy if exists questions_read_authenticated on public.questions;
 create policy questions_read_authenticated on public.questions
@@ -66,3 +75,9 @@ create policy attempts_read_own on public.practice_attempts
 drop policy if exists attempts_insert_own on public.practice_attempts;
 create policy attempts_insert_own on public.practice_attempts
   for insert to authenticated with check (auth.uid() = user_id);
+
+drop policy if exists wrong_dismissed_own_rows on public.wrong_dismissed;
+create policy wrong_dismissed_own_rows on public.wrong_dismissed
+  for all to authenticated
+  using (auth.uid() = user_id)
+  with check (auth.uid() = user_id);
