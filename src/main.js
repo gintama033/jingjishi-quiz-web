@@ -4,10 +4,14 @@ import './style.css'
 
 const supabase = createClient(supabaseUrl, supabaseAnonKey)
 const app = document.querySelector('#app')
-const subject = '经济基础知识'
-const mode = 'chapter'
 const bankId = 'jingji-jichu-2026'
+const subjectName = '经济基础知识'
+const modeNames = { chapter: '章节练习', mixed: '混合练习', mock: '模拟考试', 'past-paper': '真题训练' }
 let user = null
+let subject = ''
+let mode = ''
+let selectedChapter = ''
+let bankOverview = { questionCount: 0, chapters: [] }
 let questions = []
 let sessionState = null
 let currentIndex = 0
@@ -40,6 +44,17 @@ function renderAuth(message = '', email = '') {
     </main>`
 }
 
+function renderTopbar(backAction = '', backLabel = '') {
+  return `<header class="topbar">
+    <a class="brand" href="#" data-action="subjects" aria-label="经师首页"><span class="brand-mark">经</span>经师</a>
+    <div class="topbar-right">
+      ${backAction ? `<button class="text-button" type="button" data-action="${backAction}">${escapeHtml(backLabel)}</button>` : ''}
+      <span class="user-email">${escapeHtml(user?.email || '')}</span>
+      <button class="text-button" type="button" data-action="signout">退出</button>
+    </div>
+  </header>`
+}
+
 function renderProblem(title, detail) {
   app.innerHTML = `
     <main class="page-shell">
@@ -67,20 +82,135 @@ async function saveSession() {
   sessionState = row
 }
 
-async function loadPractice() {
-  app.innerHTML = '<main class="page-shell"><div class="loading-card" role="status">正在连接题库…</div></main>'
-  const { data: bankQuestions, error: bankError } = await supabase
+async function loadHome() {
+  subject = ''
+  mode = ''
+  selectedChapter = ''
+  bankOverview = { questionCount: 0, chapters: [] }
+  app.innerHTML = '<main class="page-shell"><div class="loading-card" role="status">正在读取题库…</div></main>'
+  const { data: questionMeta, error } = await supabase
     .from('questions')
-    .select('id, stem, options, answer, analysis, chapter, point, type')
+    .select('id, chapter')
     .eq('bank_id', bankId)
     .order('id')
 
+  if (error) {
+    renderProblem('题库还没连接好', '请检查 Supabase 登录和 questions 表的读取策略。')
+    return
+  }
+
+  const chapters = new Map()
+  for (const question of questionMeta || []) {
+    if (!question.chapter) continue
+    const chapter = chapters.get(question.chapter) || { name: question.chapter, count: 0, practiced: 0 }
+    chapter.count += 1
+    chapters.set(question.chapter, chapter)
+  }
+
+  if (questionMeta?.length) {
+    const { data: attempts, error: attemptError } = await supabase
+      .from('practice_attempts')
+      .select('question_id')
+      .eq('subject', subjectName)
+      .eq('mode', 'chapter')
+    if (attemptError) {
+      renderProblem('无法读取章节进度', '请检查 Supabase 的作答记录读取策略。')
+      return
+    }
+    const practiced = new Set((attempts || []).map((attempt) => attempt.question_id))
+    for (const question of questionMeta) {
+      const chapter = chapters.get(question.chapter)
+      if (chapter && practiced.has(question.id)) chapter.practiced += 1
+    }
+  }
+
+  bankOverview = { questionCount: questionMeta?.length || 0, chapters: [...chapters.values()] }
+  renderSubjects()
+}
+
+function renderSubjects() {
+  app.innerHTML = `
+    <div class="app-shell">
+      ${renderTopbar()}
+      <main class="selection-shell">
+        <p class="eyebrow">2026 · 中级经济师</p>
+        <h1 tabindex="-1">先选科目，再开始练习</h1>
+        <p class="selection-copy">题目、错题与学习进度分别记录，切换科目不会混在一起。</p>
+        <div class="choice-list">
+          <button class="choice-card" type="button" data-action="subject" ${bankOverview.questionCount ? '' : 'disabled'}>
+            <span><strong>经济基础知识</strong><small>${bankOverview.questionCount ? `${bankOverview.questionCount} 道题 · ${bankOverview.chapters.length} 个章节` : '题库尚未导入'}</small></span>
+            <span class="choice-status">${bankOverview.questionCount ? '可练习' : '待导入'}</span>
+          </button>
+          <button class="choice-card unavailable" type="button" disabled>
+            <span><strong>工商管理专业知识和实务</strong><small>题库待导入；目前不可练习</small></span>
+            <span class="choice-status">待导入</span>
+          </button>
+        </div>
+        <p class="source-note">当前仅有验证题库；未导入的题目不会用于练习或模拟考试。</p>
+      </main>
+    </div>`
+  app.querySelector('h1')?.focus()
+}
+
+function renderModes() {
+  const mixedReady = bankOverview.questionCount > 1 && bankOverview.chapters.length > 1
+  const modes = [
+    { id: 'chapter', name: modeNames.chapter, detail: '按教材章节练习，逐题查看答案与解析。', enabled: bankOverview.questionCount > 0, status: `${bankOverview.questionCount} 道题可用` },
+    { id: 'mixed', name: modeNames.mixed, detail: '跨章节、不计时，逐题反馈。', enabled: mixedReady, status: mixedReady ? `${bankOverview.chapters.length} 个章节可用` : '至少需要两个有题章节' },
+    { id: 'mock', name: modeNames.mock, detail: '限时组卷，交卷后查看成绩与解析。', enabled: false, status: '样题数量不足，组卷规则尚未核实' },
+    { id: 'past-paper', name: modeNames['past-paper'], detail: '按年份完成完整真题试卷。', enabled: false, status: '尚未导入完整年份试卷' },
+  ]
+  app.innerHTML = `
+    <div class="app-shell">
+      ${renderTopbar('subjects', '返回科目')}
+      <main class="selection-shell">
+        <p class="eyebrow">${escapeHtml(subject)}</p>
+        <h1 tabindex="-1">选择练习方式</h1>
+        <div class="choice-list">
+          ${modes.map((item) => `<button class="choice-card mode-card${item.enabled ? '' : ' unavailable'}" type="button" data-action="mode" data-mode="${item.id}" ${item.enabled ? '' : 'disabled'}>
+            <span><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.detail)}</small></span>
+            <span class="choice-status">${escapeHtml(item.status)}</span>
+          </button>`).join('')}
+        </div>
+      </main>
+    </div>`
+  app.querySelector('h1')?.focus()
+}
+
+function renderChapters() {
+  app.innerHTML = `
+    <div class="app-shell">
+      ${renderTopbar('modes', '返回练习方式')}
+      <main class="selection-shell">
+        <p class="eyebrow">${escapeHtml(subject)} · 章节练习</p>
+        <h1 tabindex="-1">选择章节</h1>
+        <p class="selection-copy">系统显示已练题量；再次进入同一章节会恢复最近一次未完成进度。</p>
+        <div class="choice-list">
+          ${bankOverview.chapters.map((chapter) => `<button class="choice-card" type="button" data-action="chapter" data-chapter="${escapeHtml(chapter.name)}">
+            <span><strong>${escapeHtml(chapter.name)}</strong><small>${chapter.count} 道题</small></span>
+            <span class="choice-status">已练 ${chapter.practiced}/${chapter.count}</span>
+          </button>`).join('')}
+        </div>
+      </main>
+    </div>`
+  app.querySelector('h1')?.focus()
+}
+
+async function loadPractice() {
+  app.innerHTML = '<main class="page-shell"><div class="loading-card" role="status">正在连接题库…</div></main>'
+  let query = supabase
+    .from('questions')
+    .select('id, stem, options, answer, analysis, chapter, point, type')
+    .eq('bank_id', bankId)
+  if (mode === 'chapter') query = query.eq('chapter', selectedChapter)
+  const { data: bankQuestions, error: bankError } = await query.order('id')
+
   if (bankError) {
-    renderProblem('题库还没连接好', '请先在 Supabase 执行项目里的 supabase/setup.sql 和本地样题脚本。')
+    renderProblem('题库还没连接好', '请检查 Supabase 登录和 questions 表的读取策略。')
     return
   }
   if (!bankQuestions?.length) {
-    renderProblem('样题尚未导入', '请在 Supabase SQL Editor 执行 supabase/seed.local.sql，再重新加载。')
+    renderProblem('当前筛选下没有题目', '请选择其他章节，或等待该章节题库导入。')
     return
   }
 
@@ -98,8 +228,9 @@ async function loadPractice() {
 
   const byId = new Map(bankQuestions.map((question) => [question.id, question]))
   const ids = saved?.question_ids?.filter((id) => byId.has(id))
-  questions = ids?.length ? ids.map((id) => byId.get(id)) : bankQuestions
-  sessionState = saved && !saved.completed
+  const resume = Boolean(saved && !saved.completed && ids?.length)
+  questions = resume ? ids.map((id) => byId.get(id)) : bankQuestions
+  sessionState = resume
     ? { ...saved, question_ids: questions.map((question) => question.id), answers: saved.answers || {} }
     : {
         user_id: user.id,
@@ -117,13 +248,13 @@ async function loadPractice() {
 
   try {
     await saveSession()
-    renderQuestion()
+    renderQuestion(true)
   } catch {
     renderProblem('无法保存练习进度', '请确认 Supabase 的练习进度 RLS 策略已安装。')
   }
 }
 
-function renderQuestion() {
+function renderQuestion(focusHeading = false) {
   const question = questions[currentIndex]
   const savedAnswer = sessionState.answers[question.id]
   const selected = savedAnswer ? new Set(Array.isArray(savedAnswer.selected) ? savedAnswer.selected : [savedAnswer.selected]) : multiDraft
@@ -151,13 +282,10 @@ function renderQuestion() {
 
   app.innerHTML = `
     <div class="app-shell">
-      <header class="topbar">
-        <a class="brand" href="#" aria-label="经师首页"><span class="brand-mark">经</span>经师</a>
-        <div class="topbar-right"><span class="user-email">${escapeHtml(user.email || '')}</span><button class="text-button" type="button" data-action="signout">退出</button></div>
-      </header>
+      ${renderTopbar('modes', '更换练习方式')}
       <main class="practice-shell">
         <div class="page-heading">
-          <div><p class="eyebrow">经济基础知识 · 样题验证</p><h1>章节练习</h1></div>
+          <div><p class="eyebrow">${escapeHtml(subject)}${mode === 'chapter' ? ` · ${escapeHtml(selectedChapter)}` : ' · 跨章节'}</p><h1 tabindex="-1">${escapeHtml(modeNames[mode])}</h1></div>
           <span class="progress-pill">${currentIndex + 1} / ${questions.length}</span>
         </div>
         <section class="question-card" aria-labelledby="question-stem">
@@ -167,9 +295,10 @@ function renderQuestion() {
           ${feedback}
           ${savedAnswer ? `<button class="button primary next-button" type="button" data-action="next" ${busy ? 'disabled' : ''}>${currentIndex + 1 === questions.length ? '完成练习' : '下一题'}</button>` : ''}
         </section>
-        <p class="source-note">当前仅载入 ${questions.length} 道样题；完整题库尚未导入。</p>
+        <p class="source-note">当前题库共 ${bankOverview.questionCount} 道题；模拟考试和真题训练在题库/规则核实前不可用。</p>
       </main>
     </div>`
+  if (focusHeading) app.querySelector('.page-heading h1')?.focus()
 }
 
 async function submitAnswer(selected) {
@@ -213,10 +342,10 @@ async function goNext() {
       busy = false
       app.innerHTML = `
         <div class="app-shell">
-          <header class="topbar"><a class="brand" href="#"><span class="brand-mark">经</span>经师</a><button class="text-button" type="button" data-action="signout">退出</button></header>
+          ${renderTopbar('modes', '更换练习方式')}
           <main class="page-shell"><section class="complete-card">
-            <p class="eyebrow">本组样题已完成</p><h1>练习完成</h1>
-            <p>本次样题作答已保存到你的 Supabase 账号。</p>
+            <p class="eyebrow">${escapeHtml(subject)} · ${escapeHtml(modeNames[mode])}</p><h1 tabindex="-1">练习完成</h1>
+            <p>本次作答已保存到你的 Supabase 账号。</p>
             <button class="button primary" type="button" data-action="restart">再练一次</button>
           </section></main>
         </div>`
@@ -255,10 +384,30 @@ app.addEventListener('click', async (event) => {
   if (!button) return
   const action = button.dataset.action
 
+  if (button.tagName === 'A') event.preventDefault()
   if (action === 'signout') {
     await supabase.auth.signOut()
-  } else if (action === 'reload') {
+  } else if (action === 'subjects') {
+    await loadHome()
+  } else if (action === 'modes') {
+    mode = ''
+    selectedChapter = ''
+    renderModes()
+  } else if (action === 'subject') {
+    subject = subjectName
+    renderModes()
+  } else if (action === 'mode') {
+    mode = button.dataset.mode
+    selectedChapter = ''
+    if (mode === 'chapter') renderChapters()
+    else await loadPractice()
+  } else if (action === 'chapter') {
+    selectedChapter = button.dataset.chapter
     await loadPractice()
+  } else if (action === 'reload') {
+    if (mode) await loadPractice()
+    else if (subject) renderModes()
+    else await loadHome()
   } else if (action === 'option') {
     const question = questions[currentIndex]
     const key = button.dataset.key
@@ -293,11 +442,11 @@ app.addEventListener('click', async (event) => {
 
 const { data: { session } } = await supabase.auth.getSession()
 user = session?.user || null
-if (user) await loadPractice()
+if (user) await loadHome()
 else renderAuth()
 
 supabase.auth.onAuthStateChange((_event, nextSession) => {
   user = nextSession?.user || null
-  if (user) void loadPractice()
+  if (user) void loadHome()
   else renderAuth()
 })
