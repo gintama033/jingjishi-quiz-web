@@ -35,7 +35,8 @@ function escapeHtml(value = '') {
 }
 
 function emailFor(username) {
-  return `${username.trim().toLowerCase()}${AUTH_DOMAIN}`
+  const value = username.trim().toLowerCase()
+  return value.includes('@') ? value : `${value}${AUTH_DOMAIN}`
 }
 
 function displayName() {
@@ -69,11 +70,10 @@ function renderAuth(message = '', username = '') {
       <section class="auth-card" aria-labelledby="auth-title">
         <p class="eyebrow">2026 · 中级经济师</p>
         <h1 id="auth-title">把今天的练习，变成考试时的底气。</h1>
-        <p class="auth-copy">用用户名登录即可。账号需先在 Supabase 控制台创建，界面不开放注册。</p>
+        <p class="auth-copy">用用户名登录即可；暂时不想改账号的，直接填原来的完整邮箱也能登录。界面不开放注册。</p>
         <form id="auth-form">
           <label for="username">用户名</label>
-          <input id="username" name="username" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" value="${escapeHtml(username)}" required />
-          <label for="password">密码</label>
+          <input id="username" name="username" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" value="${escapeHtml(username)}" required />          <label for="password">密码</label>
           <input id="password" name="password" type="password" autocomplete="current-password" minlength="8" required />
           <button class="button primary wide" type="submit" ${busy ? 'disabled' : ''}>${busy ? '请稍候…' : '登录'}</button>
         </form>
