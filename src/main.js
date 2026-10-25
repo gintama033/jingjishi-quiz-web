@@ -6,12 +6,13 @@ const supabase = createClient(supabaseUrl, supabaseAnonKey)
 const app = document.querySelector('#app')
 const bankId = 'jingji-jichu-2026'
 const subjectName = '经济基础知识'
-const modeNames = { chapter: '章节练习', mixed: '混合练习', mock: '模拟考试', 'past-paper': '真题训练' }
+const modeNames = { chapter: '章节练习', topic: '专题练习', mixed: '混合练习', mock: '模拟考试', 'past-paper': '真题训练' }
 let user = null
 let subject = ''
 let mode = ''
 let selectedChapter = ''
-let bankOverview = { questionCount: 0, chapters: [] }
+let selectedPaper = ''
+let bankOverview = { questionCount: 0, chapters: [], papers: [] }
 let questions = []
 let sessionState = null
 let currentIndex = 0
@@ -80,13 +81,20 @@ async function saveSession() {
     user_id: user.id,
     subject,
     mode,
+    scope: sessionScope(),
     updated_at: new Date().toISOString(),
   }
   const { error } = await supabase
     .from('practice_sessions')
-    .upsert(row, { onConflict: 'user_id,subject,mode' })
+    .upsert(row, { onConflict: 'user_id,subject,mode,scope' })
   if (error) throw error
   sessionState = row
+}
+
+function sessionScope() {
+  if (mode === 'chapter') return selectedChapter
+  if (mode === 'topic') return selectedPaper
+  return ''
 }
 
 async function loadHome() {
@@ -94,25 +102,39 @@ async function loadHome() {
   subject = ''
   mode = ''
   selectedChapter = ''
-  bankOverview = { questionCount: 0, chapters: [] }
+  selectedPaper = ''
+  bankOverview = { questionCount: 0, chapters: [], papers: [] }
   app.innerHTML = '<main class="page-shell"><div class="loading-card" role="status">正在读取题库…</div></main>'
+  if (!(await loadOverview())) return
+  renderSubjects()
+}
+
+async function loadOverview() {
+  bankOverview = { questionCount: 0, chapters: [], papers: [] }
   const { data: questionMeta, error } = await supabase
     .from('questions')
-    .select('id, chapter')
+    .select('id, chapter, source')
     .eq('bank_id', bankId)
     .order('id')
 
   if (error) {
     renderProblem('题库还没连接好', '请检查 Supabase 登录和 questions 表的读取策略。')
-    return
+    return false
   }
 
   const chapters = new Map()
+  const papers = new Map()
   for (const question of questionMeta || []) {
-    if (!question.chapter) continue
-    const chapter = chapters.get(question.chapter) || { name: question.chapter, count: 0, practiced: 0 }
-    chapter.count += 1
-    chapters.set(question.chapter, chapter)
+    if (question.chapter) {
+      const chapter = chapters.get(question.chapter) || { name: question.chapter, count: 0, practiced: 0 }
+      chapter.count += 1
+      chapters.set(question.chapter, chapter)
+    }
+    if (question.source) {
+      const paper = papers.get(question.source) || { name: question.source, count: 0, practiced: 0 }
+      paper.count += 1
+      papers.set(question.source, paper)
+    }
   }
 
   if (questionMeta?.length) {
@@ -120,20 +142,26 @@ async function loadHome() {
       .from('practice_attempts')
       .select('question_id')
       .eq('subject', subjectName)
-      .eq('mode', 'chapter')
     if (attemptError) {
       renderProblem('无法读取章节进度', '请检查 Supabase 的作答记录读取策略。')
-      return
+      return false
     }
     const practiced = new Set((attempts || []).map((attempt) => attempt.question_id))
     for (const question of questionMeta) {
+      if (!practiced.has(question.id)) continue
       const chapter = chapters.get(question.chapter)
-      if (chapter && practiced.has(question.id)) chapter.practiced += 1
+      if (chapter) chapter.practiced += 1
+      const paper = papers.get(question.source)
+      if (paper) paper.practiced += 1
     }
   }
 
-  bankOverview = { questionCount: questionMeta?.length || 0, chapters: [...chapters.values()] }
-  renderSubjects()
+  bankOverview = {
+    questionCount: questionMeta?.length || 0,
+    chapters: [...chapters.values()],
+    papers: [...papers.values()].filter((paper) => paper.count > 1),
+  }
+  return true
 }
 
 function renderSubjects() {
@@ -162,10 +190,12 @@ function renderSubjects() {
 
 function renderModes() {
   const mixedReady = bankOverview.questionCount > 1 && bankOverview.chapters.length > 1
+  const topicReady = bankOverview.papers.length > 0
   const modes = [
     { id: 'chapter', name: modeNames.chapter, detail: '按教材章节练习，逐题查看答案与解析。', enabled: bankOverview.questionCount > 0, status: `${bankOverview.questionCount} 道题可用` },
+    { id: 'topic', name: modeNames.topic, detail: '按导入的每份试卷成套练习，逐题反馈。', enabled: topicReady, status: topicReady ? `${bankOverview.papers.length} 套可用` : '题库尚未导入' },
     { id: 'mixed', name: modeNames.mixed, detail: '跨章节、不计时，逐题反馈。', enabled: mixedReady, status: mixedReady ? `${bankOverview.chapters.length} 个章节可用` : '至少需要两个有题章节' },
-    { id: 'mock', name: modeNames.mock, detail: '限时组卷，交卷后查看成绩与解析。', enabled: false, status: '样题数量不足，组卷规则尚未核实' },
+    { id: 'mock', name: modeNames.mock, detail: '限时组卷，交卷后查看成绩与解析。', enabled: false, status: '组卷规则尚未核实' },
     { id: 'past-paper', name: modeNames['past-paper'], detail: '按年份完成完整真题试卷。', enabled: false, status: '尚未导入完整年份试卷' },
   ]
   app.innerHTML = `
@@ -204,6 +234,25 @@ function renderChapters() {
   app.querySelector('h1')?.focus()
 }
 
+function renderPapers() {
+  app.innerHTML = `
+    <div class="app-shell">
+      ${renderTopbar('modes', '返回练习方式')}
+      <main class="selection-shell">
+        <p class="eyebrow">${escapeHtml(subject)} · 专题练习</p>
+        <h1 tabindex="-1">选择一套题</h1>
+        <p class="selection-copy">每份导入的试卷为一套，按原卷顺序逐题练习；再次进入同一套会恢复最近一次未完成进度。</p>
+        <div class="choice-list">
+          ${bankOverview.papers.map((paper) => `<button class="choice-card" type="button" data-action="paper" data-paper="${escapeHtml(paper.name)}">
+            <span><strong>${escapeHtml(paper.name)}</strong><small>${paper.count} 道题</small></span>
+            <span class="choice-status">已练 ${paper.practiced}/${paper.count}</span>
+          </button>`).join('')}
+        </div>
+      </main>
+    </div>`
+  app.querySelector('h1')?.focus()
+}
+
 async function loadPractice() {
   view = 'practice'
   app.innerHTML = '<main class="page-shell"><div class="loading-card" role="status">正在连接题库…</div></main>'
@@ -212,6 +261,7 @@ async function loadPractice() {
     .select('id, stem, options, answer, analysis, chapter, point, type')
     .eq('bank_id', bankId)
   if (mode === 'chapter') query = query.eq('chapter', selectedChapter)
+  if (mode === 'topic') query = query.eq('source', selectedPaper)
   const { data: bankQuestions, error: bankError } = await query.order('id')
 
   if (bankError) {
@@ -228,6 +278,7 @@ async function loadPractice() {
     .select('*')
     .eq('subject', subject)
     .eq('mode', mode)
+    .eq('scope', sessionScope())
     .maybeSingle()
 
   if (sessionError) {
@@ -294,7 +345,7 @@ function renderQuestion(focusHeading = false) {
       ${renderTopbar('modes', '更换练习方式')}
       <main class="practice-shell">
         <div class="page-heading">
-          <div><p class="eyebrow">${escapeHtml(subject)}${mode === 'chapter' ? ` · ${escapeHtml(selectedChapter)}` : ' · 跨章节'}</p><h1 tabindex="-1">${escapeHtml(modeNames[mode])}</h1></div>
+          <div><p class="eyebrow">${escapeHtml(subject)} · ${escapeHtml(mode === 'topic' ? selectedPaper : mode === 'chapter' ? selectedChapter : '跨章节')}</p><h1 tabindex="-1">${escapeHtml(modeNames[mode])}</h1></div>
           <span class="progress-pill">${currentIndex + 1} / ${questions.length}</span>
         </div>
         <section class="question-card" aria-labelledby="question-stem">
@@ -532,17 +583,23 @@ app.addEventListener('click', async (event) => {
   } else if (action === 'modes') {
     mode = ''
     selectedChapter = ''
-    renderModes()
+    selectedPaper = ''
+    if (await loadOverview()) renderModes()
   } else if (action === 'subject') {
     subject = subjectName
     renderModes()
   } else if (action === 'mode') {
     mode = button.dataset.mode
     selectedChapter = ''
+    selectedPaper = ''
     if (mode === 'chapter') renderChapters()
+    else if (mode === 'topic') renderPapers()
     else await loadPractice()
   } else if (action === 'chapter') {
     selectedChapter = button.dataset.chapter
+    await loadPractice()
+  } else if (action === 'paper') {
+    selectedPaper = button.dataset.paper
     await loadPractice()
   } else if (action === 'tab') {
     const tab = button.dataset.tab

@@ -16,13 +16,14 @@ create table if not exists public.practice_sessions (
   user_id uuid not null references auth.users(id) on delete cascade default auth.uid(),
   session_id uuid not null default gen_random_uuid(),
   subject text not null,
-  mode text not null check (mode in ('chapter', 'mixed', 'mock', 'past-paper')),
+  mode text not null check (mode in ('chapter', 'topic', 'mixed', 'mock', 'past-paper')),
+  scope text not null default '',
   question_ids text[] not null default '{}',
   current_index integer not null default 0 check (current_index >= 0),
   answers jsonb not null default '{}'::jsonb,
   completed boolean not null default false,
   updated_at timestamptz not null default now(),
-  primary key (user_id, subject, mode)
+  primary key (user_id, subject, mode, scope)
 );
 
 create table if not exists public.practice_attempts (
@@ -31,7 +32,7 @@ create table if not exists public.practice_attempts (
   session_id uuid not null,
   question_id text not null references public.questions(id) on delete restrict,
   subject text not null,
-  mode text not null check (mode in ('chapter', 'mixed', 'mock', 'past-paper')),
+  mode text not null check (mode in ('chapter', 'topic', 'mixed', 'mock', 'past-paper')),
   selected_answer jsonb not null,
   is_correct boolean not null,
   answered_at timestamptz not null default now(),
@@ -39,7 +40,19 @@ create table if not exists public.practice_attempts (
 );
 
 create index if not exists questions_bank_id_idx on public.questions (bank_id, id);
+create index if not exists questions_source_idx on public.questions (bank_id, source);
 create index if not exists practice_attempts_user_date_idx on public.practice_attempts (user_id, answered_at desc);
+
+-- 旧版练习进度表没有 scope 列，且主键不含 scope；重新对齐（只影响未完成进度）。
+alter table public.practice_sessions add column if not exists scope text not null default '';
+alter table public.practice_sessions drop constraint if exists practice_sessions_mode_check;
+alter table public.practice_sessions
+  add constraint practice_sessions_mode_check check (mode in ('chapter', 'topic', 'mixed', 'mock', 'past-paper'));
+alter table public.practice_sessions drop constraint if exists practice_sessions_pkey;
+alter table public.practice_sessions add primary key (user_id, subject, mode, scope);
+alter table public.practice_attempts drop constraint if exists practice_attempts_mode_check;
+alter table public.practice_attempts
+  add constraint practice_attempts_mode_check check (mode in ('chapter', 'topic', 'mixed', 'mock', 'past-paper'));
 
 create table if not exists public.wrong_dismissed (
   user_id uuid not null references auth.users(id) on delete cascade default auth.uid(),
