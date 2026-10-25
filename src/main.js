@@ -829,7 +829,10 @@ if (user) await loadHome()
 else renderAuth('', localStorage.getItem('jjc.username') || '')
 
 supabase.auth.onAuthStateChange((_event, nextSession) => {
-  user = nextSession?.user || null
+  const nextUser = nextSession?.user || null
+  // 切回窗口时 supabase 会重新发 token，事件频繁触发；用户没变就不重载页面。
+  if ((nextUser?.id || null) === (user?.id || null)) return
+  user = nextUser
   if (user) void loadHome()
   else renderAuth('', localStorage.getItem('jjc.username') || '')
 })
